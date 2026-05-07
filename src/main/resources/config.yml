@@ -1,0 +1,60 @@
+Settings:
+  GUI_Title: "&8[ 초월 강화 시스템 ]"
+  Sound_Hammer: "BLOCK_ANVIL_USE"
+  Sound_Success: "UI_TOAST_CHALLENGE_COMPLETE"
+  Sound_Fail: "BLOCK_ANVIL_LAND"
+  Sound_Fail_Break: "ENTITY_ITEM_BREAK"
+  Effect_Progress: "ENCHANTMENT_TABLE"
+  Effect_Success: "VILLAGER_HAPPY"
+  Effect_Fail: "SMOKE_NORMAL"
+  Broadcast_Success: "&6[초월]&f {player}님이 &a초월 강화에 성공&f했습니다!"
+  Message_Fail: "&c[초월] 강화에 실패했습니다."
+
+Slots:
+  Tool_Input: 10
+  Material_Input: 12
+  Start_Button: 22
+  Result_Output: 16
+
+Items:
+  Background:
+    Material: "GRAY_STAINED_GLASS_PANE"
+    Name: " "
+    Lore: []
+  Transcendence_Stone:
+    Material: "PRISMARINE_SHARD"
+    Name: "&b&l[초월석]"
+    Lore:
+      - "&f도구를 다음 단계로 강화합니다."
+    CustomModelData: 10001
+  Enhanceable_Tool_Filter:
+    DisplayName_Equals: "기본 도구"
+    CustomModelData: -1
+  Start_Button:
+    Name: "&a[ 강화 시작 ]"
+    Lore:
+      - "&7클릭하여 강화를 진행합니다."
+    Material: "LIME_STAINED_GLASS_PANE"
+  Start_Button_Disabled:
+    Name: "&c[ 강화 불가 ]"
+    Lore:
+      - "&7조건이 충족되지 않았습니다."
+    Material: "RED_STAINED_GLASS_PANE"
+  Start_Button_Running:
+    Name: "&e[ 강화 진행중 ]"
+    Lore:
+      - "&75초간 초월을 시도합니다."
+    Material: "YELLOW_STAINED_GLASS_PANE"
+Enhance_Table:
+  WOOD_TO_STONE:
+    Success_Rate: 80
+    Cost: 0
+  STONE_TO_IRON:
+    Success_Rate: 60
+    Cost: 0
+  IRON_TO_DIAMOND:
+    Success_Rate: 40
+    Cost: 0
+  DIAMOND_TO_NETHERITE:
+    Success_Rate: 20
+    Cost: 0
