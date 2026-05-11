@@ -1,12 +1,15 @@
 package com.transcendence.enhance.gui;
 
 import com.transcendence.enhance.TranscendenceEnhancePlugin;
+import com.transcendence.enhance.item.EnhancementMaterialFactory;
+import com.transcendence.enhance.service.EnhancementPlan;
 import com.transcendence.enhance.service.EnhancementResult;
 import com.transcendence.enhance.service.EnhancementService;
+import com.transcendence.enhance.service.EnhancementType;
+import com.transcendence.enhance.util.TextUtil;
+import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
-import org.bukkit.ChatColor;
 import org.bukkit.Material;
-import org.bukkit.NamespacedKey;
 import org.bukkit.Particle;
 import org.bukkit.Sound;
 import org.bukkit.configuration.ConfigurationSection;
@@ -15,28 +18,37 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
-import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
-import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.scheduler.BukkitTask;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 
 public final class TranscendenceGuiListener implements Listener {
 
     private static final int GUI_SIZE = 27;
-    private static final int TOTAL_PROCESS_TICKS = 100; // fixed 5 seconds
-    private static final int BEAT_INTERVAL_TICKS = 20;  // one beat every second
+    private static final int TOTAL_PROCESS_TICKS = 100;
+    private static final int BEAT_INTERVAL_TICKS = 20;
 
     private final TranscendenceEnhancePlugin plugin;
     private final EnhancementService enhancementService;
-    private final NamespacedKey stoneKey;
+    private final EnhancementMaterialFactory materialFactory;
     private final Set<UUID> processingPlayers = new HashSet<>();
     private final Map<UUID, List<BukkitTask>> scheduledTasksByPlayer = new HashMap<>();
     private final Map<UUID, ProcessingContext> processingContexts = new HashMap<>();
@@ -44,31 +56,41 @@ public final class TranscendenceGuiListener implements Listener {
     private enum GuiState {
         WAIT_TOOL,
         INVALID_TOOL,
-        WAIT_STONE,
-        INVALID_STONE,
+        MAX_LEVEL,
+        WAIT_MATERIAL,
+        INVALID_MATERIAL,
+        NOT_ENOUGH_MATERIAL,
         RESULT_NOT_CLAIMED,
         READY
     }
 
-    private static final class ProcessingContext {
-        private final ItemStack originalTool;
-        private final ItemStack originalStone;
-
-        private ProcessingContext(ItemStack originalTool, ItemStack originalStone) {
-            this.originalTool = originalTool;
-            this.originalStone = originalStone;
-        }
+    private record Evaluation(GuiState state, EnhancementPlan plan) {
     }
 
-    public TranscendenceGuiListener(TranscendenceEnhancePlugin plugin, EnhancementService enhancementService, NamespacedKey stoneKey) {
+    private record ProcessingContext(EnhancementType type, EnhancementPlan plan, ItemStack originalTool, ItemStack originalMaterial) {
+    }
+
+    public TranscendenceGuiListener(
+            TranscendenceEnhancePlugin plugin,
+            EnhancementService enhancementService,
+            EnhancementMaterialFactory materialFactory
+    ) {
         this.plugin = plugin;
         this.enhancementService = enhancementService;
-        this.stoneKey = stoneKey;
+        this.materialFactory = materialFactory;
     }
 
-    public void openGui(Player player) {
-        Inventory inventory = Bukkit.createInventory(new TranscendenceInventoryHolder(), GUI_SIZE,
-                color(getConfig().getString("Settings.GUI_Title", "&8[ 초월 강화 시스템 ]")));
+    public void openGui(Player player, EnhancementType type) {
+        String fallbackTitle = switch (type) {
+            case TRANSCENDENCE -> "&8[ 초월 강화 시스템 ]";
+            case EFFICIENCY -> "&8[ 효율 강화 시스템 ]";
+            case FORTUNE -> "&8[ 행운 강화 시스템 ]";
+        };
+        Inventory inventory = Bukkit.createInventory(
+                new TranscendenceInventoryHolder(type),
+                GUI_SIZE,
+                TextUtil.color(getConfig().getString(type.titlePath(), fallbackTitle))
+        );
         fillBackground(inventory);
         refreshState(inventory);
         player.openInventory(inventory);
@@ -87,15 +109,16 @@ public final class TranscendenceGuiListener implements Listener {
         int rawSlot = event.getRawSlot();
         int toolSlot = slot("Slots.Tool_Input", 10);
         int materialSlot = slot("Slots.Material_Input", 12);
-        int startSlot = slot("Slots.Start_Button", 22);
         int resultSlot = slot("Slots.Result_Output", 16);
+        int startSlot = slot("Slots.Start_Button", 22);
 
-        if (event.isShiftClick()) {
+        if (event.isShiftClick() || event.getAction() == InventoryAction.COLLECT_TO_CURSOR) {
             event.setCancelled(true);
             return;
         }
 
-        if (processingPlayers.contains(player.getUniqueId())) {
+        UUID uuid = player.getUniqueId();
+        if (processingPlayers.contains(uuid)) {
             event.setCancelled(true);
             return;
         }
@@ -116,31 +139,8 @@ public final class TranscendenceGuiListener implements Listener {
         }
 
         if (rawSlot == resultSlot) {
-            // result slot is output only: allow take-only with empty cursor.
-            ItemStack current = top.getItem(resultSlot);
-            if (current == null || current.getType() == Material.AIR) {
-                event.setCancelled(true);
-                return;
-            }
-            if (event.getHotbarButton() >= 0) {
-                event.setCancelled(true);
-                return;
-            }
-            ItemStack cursor = event.getCursor();
-            if (cursor != null && cursor.getType() != Material.AIR) {
-                event.setCancelled(true);
-                return;
-            }
-            switch (event.getAction()) {
-                case PICKUP_ALL, PICKUP_HALF, PICKUP_ONE, PICKUP_SOME -> {
-                    Bukkit.getScheduler().runTask(plugin, () -> refreshState(top));
-                    return;
-                }
-                default -> {
-                    event.setCancelled(true);
-                    return;
-                }
-            }
+            handleResultSlotClick(event, top, resultSlot);
+            return;
         }
 
         if (rawSlot == toolSlot || rawSlot == materialSlot) {
@@ -150,22 +150,23 @@ public final class TranscendenceGuiListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onInventoryDrag(InventoryDragEvent event) {
-        if (!isOurInventory(event.getView().getTopInventory())) {
+        Inventory top = event.getView().getTopInventory();
+        if (!isOurInventory(top)) {
             return;
         }
+
         int toolSlot = slot("Slots.Tool_Input", 10);
         int materialSlot = slot("Slots.Material_Input", 12);
-
-        for (int raw : event.getRawSlots()) {
-            if (raw >= GUI_SIZE) {
+        for (int rawSlot : event.getRawSlots()) {
+            if (rawSlot >= GUI_SIZE) {
                 continue;
             }
-            if (raw != toolSlot && raw != materialSlot) {
+            if (rawSlot != toolSlot && rawSlot != materialSlot) {
                 event.setCancelled(true);
                 return;
             }
         }
-        Bukkit.getScheduler().runTask(plugin, () -> refreshState(event.getView().getTopInventory()));
+        Bukkit.getScheduler().runTask(plugin, () -> refreshState(top));
     }
 
     @EventHandler
@@ -181,14 +182,13 @@ public final class TranscendenceGuiListener implements Listener {
         UUID uuid = player.getUniqueId();
         cancelAllTasks(uuid);
         processingPlayers.remove(uuid);
+        ProcessingContext context = processingContexts.remove(uuid);
 
         int toolSlot = slot("Slots.Tool_Input", 10);
         int materialSlot = slot("Slots.Material_Input", 12);
         int resultSlot = slot("Slots.Result_Output", 16);
 
-        ProcessingContext context = processingContexts.remove(uuid);
         if (context != null) {
-            // Enhancement canceled mid-process: return currently visible input items.
             giveBackIfPresent(player, inventory.getItem(toolSlot));
             giveBackIfPresent(player, inventory.getItem(materialSlot));
         } else {
@@ -207,35 +207,83 @@ public final class TranscendenceGuiListener implements Listener {
         handleDisconnectRefund(event.getPlayer());
     }
 
-    private void attemptEnhancement(Player player, Inventory inventory) {
-        int toolSlot = slot("Slots.Tool_Input", 10);
-        int materialSlot = slot("Slots.Material_Input", 12);
-        ItemStack tool = inventory.getItem(toolSlot);
-        ItemStack stone = inventory.getItem(materialSlot);
+    public void shutdownAndRefundAll() {
+        Set<UUID> uuids = new HashSet<>(processingContexts.keySet());
+        for (UUID uuid : uuids) {
+            Player player = Bukkit.getPlayer(uuid);
+            if (player != null) {
+                handleDisconnectRefund(player);
+            } else {
+                cancelAllTasks(uuid);
+                processingPlayers.remove(uuid);
+                processingContexts.remove(uuid);
+            }
+        }
+    }
 
-        GuiState state = evaluateState(inventory, tool, stone);
-        if (state != GuiState.READY) {
-            refreshState(inventory);
+    private void handleResultSlotClick(InventoryClickEvent event, Inventory top, int resultSlot) {
+        ItemStack current = top.getItem(resultSlot);
+        if (current == null || current.getType() == Material.AIR) {
+            event.setCancelled(true);
+            return;
+        }
+        if (event.getHotbarButton() >= 0) {
+            event.setCancelled(true);
+            return;
+        }
+        ItemStack cursor = event.getCursor();
+        if (cursor != null && cursor.getType() != Material.AIR) {
+            event.setCancelled(true);
             return;
         }
 
-        int cost = enhancementService.getCost(tool);
-        if (!hasEnoughCost(player, cost)) {
-            player.sendMessage(color("&c강화 비용이 부족합니다."));
+        switch (event.getAction()) {
+            case PICKUP_ALL, PICKUP_HALF, PICKUP_ONE, PICKUP_SOME -> Bukkit.getScheduler().runTask(plugin, () -> refreshState(top));
+            default -> event.setCancelled(true);
+        }
+    }
+
+    private void attemptEnhancement(Player player, Inventory inventory) {
+        if (!(inventory.getHolder() instanceof TranscendenceInventoryHolder holder)) {
             return;
         }
 
         UUID uuid = player.getUniqueId();
+        if (processingPlayers.contains(uuid)) {
+            return;
+        }
+
+        Evaluation evaluation = evaluateState(holder.type(), inventory);
+        if (evaluation.state() != GuiState.READY || evaluation.plan() == null) {
+            refreshState(inventory);
+            sendBlockedMessage(player, evaluation.state());
+            return;
+        }
+
+        EnhancementPlan plan = evaluation.plan();
+        if (!hasEnoughCost(player, plan.cost())) {
+            player.sendMessage(TextUtil.color(getConfig().getString("Messages.Invalid_Input", "&c[강화] 강화 조건이 충족되지 않았습니다.")));
+            return;
+        }
+
+        int toolSlot = slot("Slots.Tool_Input", 10);
+        int materialSlot = slot("Slots.Material_Input", 12);
+        ItemStack tool = inventory.getItem(toolSlot);
+        ItemStack material = inventory.getItem(materialSlot);
+        if (tool == null || material == null) {
+            refreshState(inventory);
+            return;
+        }
+
         processingPlayers.add(uuid);
-        processingContexts.put(uuid, new ProcessingContext(tool.clone(), stone.clone()));
+        processingContexts.put(uuid, new ProcessingContext(holder.type(), plan, tool.clone(), material.clone()));
         cancelAllTasks(uuid);
-        updateStartButton(inventory, "Items.Start_Button_Running", false, cost, color("&e진행중..."));
+        updateStartButton(inventory, "Items.Start_Button_Running", false, plan, "&e강화 진행중");
 
         runProgressBeats(player, uuid);
-
         BukkitTask finalTask = Bukkit.getScheduler().runTaskLater(plugin, () -> {
             try {
-                finalizeEnhancement(player, inventory, uuid, cost);
+                finalizeEnhancement(player, inventory, uuid);
             } finally {
                 processingPlayers.remove(uuid);
                 cancelAllTasks(uuid);
@@ -245,13 +293,9 @@ public final class TranscendenceGuiListener implements Listener {
         trackTask(uuid, finalTask);
     }
 
-    private void finalizeEnhancement(Player player, Inventory inventory, UUID uuid, int cost) {
-        if (!isOurInventory(inventory)) {
-            return;
-        }
-
+    private void finalizeEnhancement(Player player, Inventory inventory, UUID uuid) {
         ProcessingContext context = processingContexts.remove(uuid);
-        if (context == null) {
+        if (context == null || !isOurInventory(inventory)) {
             return;
         }
 
@@ -261,48 +305,283 @@ public final class TranscendenceGuiListener implements Listener {
             giveBackIfPresent(player, existingResult);
         }
 
-        EnhancementResult result = enhancementService.enhance(context.originalTool);
-        if (!result.isValid()) {
-            giveBackIfPresent(player, context.originalTool);
-            giveBackIfPresent(player, context.originalStone);
+        EnhancementResult result = enhancementService.enhance(context.plan(), context.originalTool());
+        if (!result.isValid() || result.getResultItem() == null) {
+            giveBackIfPresent(player, context.originalTool());
+            giveBackIfPresent(player, context.originalMaterial());
+            clearInputSlots(inventory);
             return;
         }
+
+        clearInputSlots(inventory);
+        giveBackRemainingMaterial(player, context.originalMaterial(), context.plan().stoneAmount());
+        inventory.setItem(resultSlot, result.getResultItem());
 
         if (result.isSuccess()) {
-            clearInputSlots(inventory);
-            inventory.setItem(resultSlot, result.getUpgradedItem());
             playSuccess(player);
-            broadcastSuccess(player);
-            updateStartButton(inventory, "Items.Start_Button_Disabled", false, cost, color("&e결과물을 먼저 회수하세요"));
+            sendSuccessMessage(player, context.type());
+        } else {
+            playFail(player);
+            playFailBreak(player);
+            sendConfiguredMessage(player, "Messages.Fail", "&c[강화] 강화에 실패했습니다.");
+        }
+
+        updateStartButton(inventory, "Items.Start_Button_Disabled", false, context.plan(), "&e결과 회수 필요");
+    }
+
+    private Evaluation evaluateState(EnhancementType type, Inventory inventory) {
+        int toolSlot = slot("Slots.Tool_Input", 10);
+        int materialSlot = slot("Slots.Material_Input", 12);
+        int resultSlot = slot("Slots.Result_Output", 16);
+
+        ItemStack result = inventory.getItem(resultSlot);
+        if (result != null && result.getType() != Material.AIR) {
+            return new Evaluation(GuiState.RESULT_NOT_CLAIMED, null);
+        }
+
+        ItemStack tool = inventory.getItem(toolSlot);
+        if (tool == null || tool.getType() == Material.AIR) {
+            return new Evaluation(GuiState.WAIT_TOOL, null);
+        }
+
+        Optional<EnhancementPlan> plan = enhancementService.createPlan(type, tool);
+        if (plan.isEmpty()) {
+            GuiState state = enhancementService.isAtMaximum(type, tool) ? GuiState.MAX_LEVEL : GuiState.INVALID_TOOL;
+            return new Evaluation(state, null);
+        }
+
+        ItemStack material = inventory.getItem(materialSlot);
+        if (material == null || material.getType() == Material.AIR) {
+            return new Evaluation(GuiState.WAIT_MATERIAL, plan.get());
+        }
+        if (!materialFactory.isMaterial(type.materialType(), material)) {
+            return new Evaluation(GuiState.INVALID_MATERIAL, plan.get());
+        }
+        if (material.getAmount() < plan.get().stoneAmount()) {
+            return new Evaluation(GuiState.NOT_ENOUGH_MATERIAL, plan.get());
+        }
+
+        return new Evaluation(GuiState.READY, plan.get());
+    }
+
+    private void refreshState(Inventory inventory) {
+        if (!(inventory.getHolder() instanceof TranscendenceInventoryHolder holder)) {
             return;
         }
 
-        // fail: keep tool intact, consume only stone
-        clearInputSlots(inventory);
-        inventory.setItem(resultSlot, context.originalTool);
-        playFail(player);
-        playFailBreak(player);
-        String failMsg = color(getConfig().getString("Settings.Message_Fail", "&c[초월] 강화에 실패했습니다."));
-        if (!failMsg.isBlank()) {
-            player.sendMessage(failMsg);
+        if (processingPlayers.contains(viewerUuid(inventory))) {
+            updateStartButton(inventory, "Items.Start_Button_Running", false, null, "&e강화 진행중");
+            return;
         }
-        updateStartButton(inventory, "Items.Start_Button_Disabled", false, cost, color("&e결과물을 먼저 회수하세요"));
+
+        Evaluation evaluation = evaluateState(holder.type(), inventory);
+        String sectionPath = evaluation.state() == GuiState.READY ? "Items.Start_Button" : "Items.Start_Button_Disabled";
+        updateStartButton(inventory, sectionPath, evaluation.state() == GuiState.READY, evaluation.plan(), stateMessage(evaluation.state(), holder.type()));
+    }
+
+    private void updateStartButton(Inventory inventory, String sectionPath, boolean enabled, EnhancementPlan plan, String subtitle) {
+        int startSlot = slot("Slots.Start_Button", 22);
+        ItemStack button = createConfiguredItem(sectionPath);
+        ItemMeta meta = button.getItemMeta();
+        if (meta != null) {
+            List<Component> lore = meta.lore() == null ? new ArrayList<>() : new ArrayList<>(meta.lore());
+            lore.add(Component.empty());
+            if (plan != null) {
+                appendPlanLore(lore, plan);
+                lore.add(Component.empty());
+            }
+            lore.add(TextUtil.color(enabled ? "&a강화 가능" : subtitle));
+            meta.lore(lore);
+            button.setItemMeta(meta);
+        }
+        inventory.setItem(startSlot, button);
+    }
+
+    private void appendPlanLore(List<Component> lore, EnhancementPlan plan) {
+        lore.add(TextUtil.color("&f[ " + plan.type().displayName() + " &f]"));
+        if (plan.type() == EnhancementType.TRANSCENDENCE) {
+            lore.add(TextUtil.color(plan.fromDisplayName() + " &f→ " + plan.toDisplayName()));
+        } else {
+            String enchantName = plan.type() == EnhancementType.EFFICIENCY ? "효율" : "행운";
+            lore.add(TextUtil.color("&f" + enchantName + " " + plan.currentLevel() + " &f→ " + enchantName + " " + plan.nextLevel()));
+        }
+        lore.add(TextUtil.color("&f필요 " + plan.type().materialType().displayName() + ": &a" + plan.stoneAmount() + "개"));
+        lore.add(TextUtil.color("&f강화 비용: &a" + plan.cost()));
+        lore.add(TextUtil.color("&f성공 확률: &a" + plan.successRate() + "%"));
+    }
+
+    private void fillBackground(Inventory inventory) {
+        ItemStack background = createConfiguredItem("Items.Background");
+        int toolSlot = slot("Slots.Tool_Input", 10);
+        int materialSlot = slot("Slots.Material_Input", 12);
+        int resultSlot = slot("Slots.Result_Output", 16);
+        int startSlot = slot("Slots.Start_Button", 22);
+
+        for (int i = 0; i < inventory.getSize(); i++) {
+            if (isBackgroundSlot(i, toolSlot, materialSlot, startSlot, resultSlot)) {
+                inventory.setItem(i, background.clone());
+            }
+        }
+    }
+
+    private ItemStack createConfiguredItem(String sectionPath) {
+        ConfigurationSection section = getConfig().getConfigurationSection(sectionPath);
+        Material material = Material.GRAY_STAINED_GLASS_PANE;
+        String name = " ";
+        List<String> lore = Collections.emptyList();
+        int modelData = -1;
+
+        if (section != null) {
+            material = safeMaterial(section.getString("Material"), material);
+            name = section.getString("Name", name);
+            lore = section.getStringList("Lore");
+            modelData = section.getInt("CustomModelData", -1);
+        }
+
+        ItemStack stack = new ItemStack(material);
+        ItemMeta meta = stack.getItemMeta();
+        if (meta != null) {
+            meta.displayName(TextUtil.color(name));
+            if (!lore.isEmpty()) {
+                meta.lore(TextUtil.colorList(lore));
+            }
+            if (modelData >= 0) {
+                meta.setCustomModelData(modelData);
+            }
+            meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
+            stack.setItemMeta(meta);
+        }
+        return stack;
     }
 
     private void runProgressBeats(Player player, UUID uuid) {
-        Sound hammer = safeSound(getConfig().getString("Settings.Sound_Hammer", "BLOCK_ANVIL_USE"), Sound.BLOCK_ANVIL_USE);
-        Particle progressParticle = safeParticle(getConfig().getString("Settings.Effect_Progress", "ENCHANTMENT_TABLE"), Particle.ENCHANTMENT_TABLE);
+        Sound hammer = safeSound(getConfig().getString("Sound.Hammer", "BLOCK_ANVIL_USE"), "BLOCK_ANVIL_USE");
+        Particle progress = safeParticle(getConfig().getString("Particle.Progress", "ENCHANTMENT_TABLE"), "ENCHANTMENT_TABLE", "ENCHANT");
 
         for (int beat = 0; beat < 5; beat++) {
             BukkitTask beatTask = Bukkit.getScheduler().runTaskLater(plugin, () -> {
                 if (!processingPlayers.contains(uuid)) {
                     return;
                 }
-                player.playSound(player.getLocation(), hammer, 0.75f, 0.95f);
-                player.spawnParticle(progressParticle, player.getLocation().add(0, 1.0, 0), 10, 0.25, 0.2, 0.25, 0.01);
+                if (hammer != null) {
+                    player.playSound(player.getLocation(), hammer, 0.75f, 0.95f);
+                }
+                if (progress != null) {
+                    player.spawnParticle(progress, player.getLocation().add(0, 1.0, 0), 10, 0.25, 0.2, 0.25, 0.01);
+                }
             }, (long) beat * BEAT_INTERVAL_TICKS);
             trackTask(uuid, beatTask);
         }
+    }
+
+    private void playSuccess(Player player) {
+        Sound sound = safeSound(getConfig().getString("Sound.Success", "UI_TOAST_CHALLENGE_COMPLETE"), "UI_TOAST_CHALLENGE_COMPLETE");
+        Particle particle = safeParticle(getConfig().getString("Particle.Success", "VILLAGER_HAPPY"), "VILLAGER_HAPPY", "HAPPY_VILLAGER");
+        if (sound != null) {
+            player.playSound(player.getLocation(), sound, 1.0f, 1.0f);
+        }
+        if (particle != null) {
+            player.spawnParticle(particle, player.getLocation().add(0, 1.0, 0), 50, 0.6, 0.4, 0.6, 0.01);
+        }
+    }
+
+    private void playFail(Player player) {
+        Sound sound = safeSound(getConfig().getString("Sound.Fail", "BLOCK_ANVIL_LAND"), "BLOCK_ANVIL_LAND");
+        Particle particle = safeParticle(getConfig().getString("Particle.Fail", "SMOKE_NORMAL"), "SMOKE_NORMAL", "SMOKE");
+        if (sound != null) {
+            player.playSound(player.getLocation(), sound, 1.0f, 0.8f);
+        }
+        if (particle != null) {
+            player.spawnParticle(particle, player.getLocation().add(0, 1.0, 0), 28, 0.5, 0.3, 0.5, 0.01);
+        }
+    }
+
+    private void playFailBreak(Player player) {
+        Sound sound = safeSound(getConfig().getString("Sound.Fail_Break", "ENTITY_ITEM_BREAK"), "ENTITY_ITEM_BREAK");
+        if (sound != null) {
+            player.playSound(player.getLocation(), sound, 0.9f, 1.0f);
+        }
+    }
+
+    private void sendSuccessMessage(Player player, EnhancementType type) {
+        switch (type) {
+            case TRANSCENDENCE -> {
+                String message = getConfig().getString("Messages.Transcendence_Success_Broadcast", "");
+                if (message != null && !message.isBlank()) {
+                    Bukkit.broadcast(TextUtil.color(message.replace("{player}", player.getName())));
+                }
+            }
+            case EFFICIENCY -> sendConfiguredMessage(player, "Messages.Efficiency_Success", "&a[효율] 강화에 성공했습니다!");
+            case FORTUNE -> sendConfiguredMessage(player, "Messages.Fortune_Success", "&a[행운] 강화에 성공했습니다!");
+        }
+    }
+
+    private void sendBlockedMessage(Player player, GuiState state) {
+        switch (state) {
+            case MAX_LEVEL -> sendConfiguredMessage(player, "Messages.Max_Level", "&c[강화] 이미 최대 단계입니다.");
+            case NOT_ENOUGH_MATERIAL -> sendConfiguredMessage(player, "Messages.Not_Enough_Material", "&c[강화] 재료 수량이 부족합니다.");
+            case INVALID_TOOL, INVALID_MATERIAL -> sendConfiguredMessage(player, "Messages.Invalid_Input", "&c[강화] 강화 조건이 충족되지 않았습니다.");
+            default -> {
+            }
+        }
+    }
+
+    private void sendConfiguredMessage(Player player, String path, String fallback) {
+        String message = getConfig().getString(path, fallback);
+        if (message != null && !message.isBlank()) {
+            player.sendMessage(TextUtil.color(message));
+        }
+    }
+
+    private void giveBackRemainingMaterial(Player player, ItemStack originalMaterial, int consumedAmount) {
+        int remaining = originalMaterial.getAmount() - consumedAmount;
+        if (remaining <= 0) {
+            return;
+        }
+        ItemStack leftover = originalMaterial.clone();
+        leftover.setAmount(remaining);
+        giveBackIfPresent(player, leftover);
+    }
+
+    private void giveBackIfPresent(Player player, ItemStack stack) {
+        if (stack == null || stack.getType() == Material.AIR) {
+            return;
+        }
+        Map<Integer, ItemStack> leftover = player.getInventory().addItem(stack);
+        for (ItemStack item : leftover.values()) {
+            player.getWorld().dropItemNaturally(player.getLocation(), item);
+        }
+    }
+
+    private void handleDisconnectRefund(Player player) {
+        UUID uuid = player.getUniqueId();
+        ProcessingContext context = processingContexts.remove(uuid);
+        cancelAllTasks(uuid);
+        processingPlayers.remove(uuid);
+        if (context == null) {
+            return;
+        }
+
+        Inventory top = player.getOpenInventory().getTopInventory();
+        if (isOurInventory(top)) {
+            int toolSlot = slot("Slots.Tool_Input", 10);
+            int materialSlot = slot("Slots.Material_Input", 12);
+            int resultSlot = slot("Slots.Result_Output", 16);
+            giveBackIfPresent(player, top.getItem(toolSlot));
+            giveBackIfPresent(player, top.getItem(materialSlot));
+            top.setItem(toolSlot, null);
+            top.setItem(materialSlot, null);
+            top.setItem(resultSlot, null);
+            return;
+        }
+
+        giveBackIfPresent(player, context.originalTool());
+        giveBackIfPresent(player, context.originalMaterial());
+    }
+
+    private void clearInputSlots(Inventory inventory) {
+        inventory.setItem(slot("Slots.Tool_Input", 10), null);
+        inventory.setItem(slot("Slots.Material_Input", 12), null);
     }
 
     private void trackTask(UUID uuid, BukkitTask task) {
@@ -321,187 +600,21 @@ public final class TranscendenceGuiListener implements Listener {
         }
     }
 
-    public void shutdownAndRefundAll() {
-        // Called during plugin disable to prevent stuck processing contexts.
-        Set<UUID> uuids = new HashSet<>(processingContexts.keySet());
-        for (UUID uuid : uuids) {
-            Player player = Bukkit.getPlayer(uuid);
-            if (player != null) {
-                handleDisconnectRefund(player);
-            } else {
-                cancelAllTasks(uuid);
-                processingPlayers.remove(uuid);
-                processingContexts.remove(uuid);
-            }
-        }
-    }
-
-    private void handleDisconnectRefund(Player player) {
-        UUID uuid = player.getUniqueId();
-        ProcessingContext context = processingContexts.remove(uuid);
-        cancelAllTasks(uuid);
-        processingPlayers.remove(uuid);
-        if (context == null) {
-            return;
-        }
-
-        // Prevent duplicate refunds when quit/close event order varies.
-        Inventory top = player.getOpenInventory().getTopInventory();
-        if (isOurInventory(top)) {
-            int toolSlot = slot("Slots.Tool_Input", 10);
-            int materialSlot = slot("Slots.Material_Input", 12);
-            int resultSlot = slot("Slots.Result_Output", 16);
-            giveBackIfPresent(player, top.getItem(toolSlot));
-            giveBackIfPresent(player, top.getItem(materialSlot));
-            top.setItem(toolSlot, null);
-            top.setItem(materialSlot, null);
-            top.setItem(resultSlot, null);
-            return;
-        }
-
-        giveBackIfPresent(player, context.originalTool);
-        giveBackIfPresent(player, context.originalStone);
-    }
-
-    private void playSuccess(Player player) {
-        Sound sound = safeSound(getConfig().getString("Settings.Sound_Success", "UI_TOAST_CHALLENGE_COMPLETE"), Sound.UI_TOAST_CHALLENGE_COMPLETE);
-        Particle particle = safeParticle(getConfig().getString("Settings.Effect_Success", "VILLAGER_HAPPY"), Particle.VILLAGER_HAPPY);
-        player.playSound(player.getLocation(), sound, 1.0f, 1.0f);
-        player.spawnParticle(particle, player.getLocation().add(0, 1.0, 0), 50, 0.6, 0.4, 0.6, 0.01);
-    }
-
-    private void playFail(Player player) {
-        Sound sound = safeSound(getConfig().getString("Settings.Sound_Fail", "BLOCK_ANVIL_LAND"), Sound.BLOCK_ANVIL_LAND);
-        Particle particle = safeParticle(getConfig().getString("Settings.Effect_Fail", "SMOKE_NORMAL"), Particle.SMOKE_NORMAL);
-        player.playSound(player.getLocation(), sound, 1.0f, 0.8f);
-        player.spawnParticle(particle, player.getLocation().add(0, 1.0, 0), 28, 0.5, 0.3, 0.5, 0.01);
-    }
-
-    private void playFailBreak(Player player) {
-        Sound sound = safeSound(getConfig().getString("Settings.Sound_Fail_Break", "ENTITY_ITEM_BREAK"), Sound.ENTITY_ITEM_BREAK);
-        player.playSound(player.getLocation(), sound, 0.9f, 1.0f);
-    }
-
-    private void broadcastSuccess(Player player) {
-        String msg = getConfig().getString("Settings.Broadcast_Success", "");
-        if (msg == null || msg.isBlank()) {
-            return;
-        }
-        Bukkit.broadcastMessage(color(msg).replace("{player}", player.getName()));
-    }
-
     private boolean hasEnoughCost(Player player, int cost) {
-        // Vault/economy integration point: currently always true because cost is 0.
         return true;
     }
 
-    private boolean isValidEnhanceTool(ItemStack tool) {
-        if (!enhancementService.isEnhanceableTool(tool)) {
-            return false;
-        }
-
-        ItemMeta meta = tool.getItemMeta();
-        if (meta == null) {
-            return false;
-        }
-
-        int requiredModelData = getConfig().getInt("Items.Enhanceable_Tool_Filter.CustomModelData", -1);
-        if (requiredModelData >= 0 && (!meta.hasCustomModelData() || meta.getCustomModelData() != requiredModelData)) {
-            return false;
-        }
-
-        String requiredEquals = normalizeName(getConfig().getString("Items.Enhanceable_Tool_Filter.DisplayName_Equals", ""));
-        if (!requiredEquals.isEmpty()) {
-            if (!meta.hasDisplayName()) {
-                return false;
-            }
-            return normalizeName(meta.getDisplayName()).equals(requiredEquals);
-        }
-
-        return true;
-    }
-
-    private String normalizeName(String input) {
-        if (input == null) {
-            return "";
-        }
-        String stripped = ChatColor.stripColor(color(input));
-        return stripped == null ? "" : stripped.trim();
-    }
-
-    private boolean isTranscendenceStone(ItemStack material) {
-        if (material == null || material.getType() == Material.AIR) {
-            return false;
-        }
-        ItemMeta meta = material.getItemMeta();
-        if (meta == null) {
-            return false;
-        }
-
-        int modelData = getConfig().getInt("Items.Transcendence_Stone.CustomModelData", 10001);
-        String expectedName = color(getConfig().getString("Items.Transcendence_Stone.Name", "&b&l[초월석]"));
-        boolean pdcMarked = meta.getPersistentDataContainer().has(stoneKey, PersistentDataType.BYTE);
-        boolean modelMatch = meta.hasCustomModelData() && meta.getCustomModelData() == modelData;
-        boolean nameMatch = meta.hasDisplayName() && meta.getDisplayName().equals(expectedName);
-        return (pdcMarked || modelMatch) && nameMatch;
-    }
-
-    private GuiState evaluateState(Inventory inventory, ItemStack tool, ItemStack stone) {
-        int resultSlot = slot("Slots.Result_Output", 16);
-        ItemStack result = inventory.getItem(resultSlot);
-        if (result != null && result.getType() != Material.AIR) {
-            return GuiState.RESULT_NOT_CLAIMED;
-        }
-
-        if (tool == null || tool.getType() == Material.AIR) {
-            return GuiState.WAIT_TOOL;
-        }
-        if (tool.getAmount() != 1 || !isValidEnhanceTool(tool)) {
-            return GuiState.INVALID_TOOL;
-        }
-        if (stone == null || stone.getType() == Material.AIR) {
-            return GuiState.WAIT_STONE;
-        }
-        if (stone.getAmount() != 1 || !isTranscendenceStone(stone)) {
-            return GuiState.INVALID_STONE;
-        }
-        return GuiState.READY;
-    }
-
-    private void refreshState(Inventory inventory) {
-        int toolSlot = slot("Slots.Tool_Input", 10);
-        int materialSlot = slot("Slots.Material_Input", 12);
-
-        if (processingPlayers.contains(viewerUuid(inventory))) {
-            updateStartButton(inventory, "Items.Start_Button_Running", false, 0, color("&e강화 진행중"));
-            return;
-        }
-
-        ItemStack tool = inventory.getItem(toolSlot);
-        ItemStack stone = inventory.getItem(materialSlot);
-        GuiState state = evaluateState(inventory, tool, stone);
-        int cost = (tool != null && tool.getType() != Material.AIR) ? enhancementService.getCost(tool) : 0;
-
-        switch (state) {
-            case READY -> {
-                updateStartButton(inventory, "Items.Start_Button", true, cost, color("&a강화 가능"));
-            }
-            case WAIT_TOOL -> {
-                updateStartButton(inventory, "Items.Start_Button_Disabled", false, cost, color("&c도구 필요"));
-            }
-            case INVALID_TOOL -> {
-                updateStartButton(inventory, "Items.Start_Button_Disabled", false, cost, color("&c도구 불일치"));
-            }
-            case WAIT_STONE -> {
-                updateStartButton(inventory, "Items.Start_Button_Disabled", false, cost, color("&c초월석 필요"));
-            }
-            case INVALID_STONE -> {
-                updateStartButton(inventory, "Items.Start_Button_Disabled", false, cost, color("&c초월석 불일치"));
-            }
-            case RESULT_NOT_CLAIMED -> {
-                updateStartButton(inventory, "Items.Start_Button_Disabled", false, cost, color("&e결과 회수 필요"));
-            }
-        }
+    private String stateMessage(GuiState state, EnhancementType type) {
+        return switch (state) {
+            case WAIT_TOOL -> "&c도구 필요";
+            case INVALID_TOOL -> "&c도구 불일치";
+            case MAX_LEVEL -> "&c이미 최대 단계";
+            case WAIT_MATERIAL -> "&c" + type.materialType().displayName() + " 필요";
+            case INVALID_MATERIAL -> "&c" + type.materialType().displayName() + " 불일치";
+            case NOT_ENOUGH_MATERIAL -> "&c재료 수량 부족";
+            case RESULT_NOT_CLAIMED -> "&e결과 회수 필요";
+            case READY -> "&a강화 가능";
+        };
     }
 
     private UUID viewerUuid(Inventory inventory) {
@@ -511,89 +624,12 @@ public final class TranscendenceGuiListener implements Listener {
         return inventory.getViewers().get(0).getUniqueId();
     }
 
-    private void updateStartButton(Inventory inventory, String sectionPath, boolean enabled, int cost, String subtitle) {
-        int startSlot = slot("Slots.Start_Button", 22);
-        ItemStack button = createConfiguredItem(sectionPath);
-        ItemMeta meta = button.getItemMeta();
-        if (meta != null) {
-            List<String> lore = meta.hasLore() && meta.getLore() != null ? new ArrayList<>(meta.getLore()) : new ArrayList<>();
-            lore.add(" ");
-            lore.add(enabled ? color("&f비용: &a" + cost) : color("&f비용: &7" + cost));
-            lore.add(subtitle);
-            meta.setLore(lore);
-            button.setItemMeta(meta);
-        }
-        inventory.setItem(startSlot, button);
-    }
-
-    private void fillBackground(Inventory inventory) {
-        ItemStack background = createConfiguredItem("Items.Background");
-        int toolSlot = slot("Slots.Tool_Input", 10);
-        int materialSlot = slot("Slots.Material_Input", 12);
-        int startSlot = slot("Slots.Start_Button", 22);
-        int resultSlot = slot("Slots.Result_Output", 16);
-
-        for (int i = 0; i < inventory.getSize(); i++) {
-            if (!isBackgroundSlot(i, toolSlot, materialSlot, startSlot, resultSlot)) {
-                continue;
-            }
-            inventory.setItem(i, background.clone());
-        }
+    private boolean isOurInventory(Inventory inventory) {
+        return inventory != null && inventory.getHolder() instanceof TranscendenceInventoryHolder && inventory.getSize() == GUI_SIZE;
     }
 
     private boolean isBackgroundSlot(int slot, int toolSlot, int materialSlot, int startSlot, int resultSlot) {
         return slot != toolSlot && slot != materialSlot && slot != startSlot && slot != resultSlot;
-    }
-
-    private void clearInputSlots(Inventory inventory) {
-        int toolSlot = slot("Slots.Tool_Input", 10);
-        int materialSlot = slot("Slots.Material_Input", 12);
-        inventory.setItem(toolSlot, null);
-        inventory.setItem(materialSlot, null);
-    }
-
-    private ItemStack createConfiguredItem(String sectionPath) {
-        ConfigurationSection section = getConfig().getConfigurationSection(sectionPath);
-        Material material = Material.GRAY_STAINED_GLASS_PANE;
-        String name = " ";
-        List<String> lore = Collections.emptyList();
-        int modelData = -1;
-
-        if (section != null) {
-            material = safeMaterial(section.getString("Material"), material);
-            name = color(section.getString("Name", name));
-            lore = color(section.getStringList("Lore"));
-            modelData = section.getInt("CustomModelData", -1);
-        }
-
-        ItemStack stack = new ItemStack(material);
-        ItemMeta meta = stack.getItemMeta();
-        if (meta != null) {
-            meta.setDisplayName(name);
-            if (!lore.isEmpty()) {
-                meta.setLore(lore);
-            }
-            if (modelData >= 0) {
-                meta.setCustomModelData(modelData);
-            }
-            meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
-            stack.setItemMeta(meta);
-        }
-        return stack;
-    }
-
-    private void giveBackIfPresent(Player player, ItemStack stack) {
-        if (stack == null || stack.getType() == Material.AIR) {
-            return;
-        }
-        Map<Integer, ItemStack> leftover = player.getInventory().addItem(stack);
-        for (ItemStack item : leftover.values()) {
-            player.getWorld().dropItemNaturally(player.getLocation(), item);
-        }
-    }
-
-    private boolean isOurInventory(Inventory inventory) {
-        return inventory != null && inventory.getHolder() instanceof TranscendenceInventoryHolder && inventory.getSize() == GUI_SIZE;
     }
 
     private FileConfiguration getConfig() {
@@ -602,21 +638,6 @@ public final class TranscendenceGuiListener implements Listener {
 
     private int slot(String path, int fallback) {
         return getConfig().getInt(path, fallback);
-    }
-
-    private String color(String input) {
-        if (input == null) {
-            return "";
-        }
-        return input.replace("&", "§");
-    }
-
-    private List<String> color(List<String> lines) {
-        List<String> out = new ArrayList<>(lines.size());
-        for (String line : lines) {
-            out.add(color(line));
-        }
-        return out;
     }
 
     private Material safeMaterial(String input, Material fallback) {
@@ -630,25 +651,33 @@ public final class TranscendenceGuiListener implements Listener {
         }
     }
 
-    private Sound safeSound(String input, Sound fallback) {
-        if (input == null || input.isBlank()) {
-            return fallback;
+    private Sound safeSound(String input, String fallback) {
+        String[] candidates = {input, fallback};
+        for (String candidate : candidates) {
+            if (candidate == null || candidate.isBlank()) {
+                continue;
+            }
+            try {
+                return Sound.valueOf(candidate.toUpperCase(Locale.ROOT));
+            } catch (IllegalArgumentException ignored) {
+            }
         }
-        try {
-            return Sound.valueOf(input.toUpperCase(Locale.ROOT));
-        } catch (IllegalArgumentException ex) {
-            return fallback;
-        }
+        return null;
     }
 
-    private Particle safeParticle(String input, Particle fallback) {
-        if (input == null || input.isBlank()) {
-            return fallback;
+    private Particle safeParticle(String input, String... fallbacks) {
+        List<String> candidates = new ArrayList<>();
+        candidates.add(input);
+        Collections.addAll(candidates, fallbacks);
+        for (String candidate : candidates) {
+            if (candidate == null || candidate.isBlank()) {
+                continue;
+            }
+            try {
+                return Particle.valueOf(candidate.toUpperCase(Locale.ROOT));
+            } catch (IllegalArgumentException ignored) {
+            }
         }
-        try {
-            return Particle.valueOf(input.toUpperCase(Locale.ROOT));
-        } catch (IllegalArgumentException ex) {
-            return fallback;
-        }
+        return null;
     }
 }

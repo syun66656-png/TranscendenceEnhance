@@ -6,20 +6,20 @@ public final class EnhancementResult {
 
     private final boolean valid;
     private final boolean success;
-    private final ItemStack upgradedItem;
+    private final ItemStack resultItem;
 
-    private EnhancementResult(boolean valid, boolean success, ItemStack upgradedItem) {
+    private EnhancementResult(boolean valid, boolean success, ItemStack resultItem) {
         this.valid = valid;
         this.success = success;
-        this.upgradedItem = upgradedItem;
+        this.resultItem = resultItem;
     }
 
-    public static EnhancementResult success(ItemStack upgradedItem) {
-        return new EnhancementResult(true, true, upgradedItem);
+    public static EnhancementResult success(ItemStack resultItem) {
+        return new EnhancementResult(true, true, resultItem);
     }
 
-    public static EnhancementResult fail() {
-        return new EnhancementResult(true, false, null);
+    public static EnhancementResult fail(ItemStack resultItem) {
+        return new EnhancementResult(true, false, resultItem);
     }
 
     public static EnhancementResult invalid() {
@@ -34,7 +34,7 @@ public final class EnhancementResult {
         return success;
     }
 
-    public ItemStack getUpgradedItem() {
-        return upgradedItem;
+    public ItemStack getResultItem() {
+        return resultItem;
     }
 }
