@@ -10,7 +10,9 @@ import com.transcendence.enhance.util.TextUtil;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
 import org.bukkit.Particle;
+import org.bukkit.Registry;
 import org.bukkit.Sound;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
@@ -657,12 +659,26 @@ public final class TranscendenceGuiListener implements Listener {
             if (candidate == null || candidate.isBlank()) {
                 continue;
             }
-            try {
-                return Sound.valueOf(candidate.toUpperCase(Locale.ROOT));
-            } catch (IllegalArgumentException ignored) {
+            Sound sound = Registry.SOUNDS.get(NamespacedKey.minecraft(toSoundKey(candidate)));
+            if (sound != null) {
+                return sound;
             }
         }
         return null;
+    }
+
+    private String toSoundKey(String input) {
+        String normalized = input.toLowerCase(Locale.ROOT);
+        if (normalized.indexOf(':') >= 0) {
+            normalized = normalized.substring(normalized.indexOf(':') + 1);
+        }
+        return switch (normalized.toUpperCase(Locale.ROOT)) {
+            case "BLOCK_ANVIL_USE" -> "block.anvil.use";
+            case "UI_TOAST_CHALLENGE_COMPLETE" -> "ui.toast.challenge_complete";
+            case "BLOCK_ANVIL_LAND" -> "block.anvil.land";
+            case "ENTITY_ITEM_BREAK" -> "entity.item.break";
+            default -> normalized.contains(".") ? normalized : normalized.replace('_', '.');
+        };
     }
 
     private Particle safeParticle(String input, String... fallbacks) {
