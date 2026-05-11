@@ -1,13 +1,13 @@
 name: TranscendenceEnhance
 version: 1.0.0
 main: com.transcendence.enhance.TranscendenceEnhancePlugin
-api-version: "1.20"
+api-version: "1.21.4"
 author: CursorAI
-description: Tool transcendence enhancement plugin
+description: Tool transcendence and enchantment enhancement plugin
 commands:
   transcendence:
-    description: Open transcendence GUI or give stones
-    usage: /transcendence | /transcendence give <amount> | /transcendence give <player> [amount]
+    description: Open enhancement GUIs or give enhancement materials
+    usage: /transcendence | /transcendence efficiency | /transcendence fortune | /transcendence give <stone|enhance> <player> [amount]
     aliases: [te, transcend]
 permissions:
   transcendence.use:
