@@ -60,7 +60,7 @@ public final class InventoryClickListener implements Listener {
         }
 
         if (RestrictedItemChecker.isRestricted(cursor)
-                && !inventoryAccess.isAllowedSlot(player, event.getView(), event.getRawSlot())) {
+                && !inventoryAccess.isClickedInventoryAllowed(player, event)) {
             event.setCancelled(true);
         }
     }
@@ -74,7 +74,7 @@ public final class InventoryClickListener implements Listener {
         tagIfRestricted(player, hotbarItem);
 
         if (RestrictedItemChecker.isRestricted(hotbarItem)
-                && !inventoryAccess.isAllowedSlot(player, event.getView(), event.getRawSlot())) {
+                && !inventoryAccess.isClickedInventoryAllowed(player, event)) {
             event.setCancelled(true);
             return;
         }
@@ -90,7 +90,7 @@ public final class InventoryClickListener implements Listener {
         tagIfRestricted(player, current);
 
         if (RestrictedItemChecker.isRestricted(offhand)
-                && !inventoryAccess.isAllowedSlot(player, event.getView(), event.getRawSlot())) {
+                && !inventoryAccess.isClickedInventoryAllowed(player, event)) {
             event.setCancelled(true);
         }
     }

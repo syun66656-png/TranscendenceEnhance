@@ -19,6 +19,11 @@ public final class InventoryAccess {
         return inventory != null && allowedInventoryProvider.isAllowed(player, inventory);
     }
 
+    public boolean isClickedInventoryAllowed(Player player, InventoryClickEvent event) {
+        Inventory clicked = event.getClickedInventory();
+        return clicked != null && allowedInventoryProvider.isAllowed(player, clicked);
+    }
+
     public boolean isShiftClickDestinationAllowed(Player player, InventoryClickEvent event) {
         Inventory clicked = event.getClickedInventory();
         if (clicked == null) {
@@ -38,6 +43,10 @@ public final class InventoryAccess {
     private Inventory inventoryForRawSlot(InventoryView view, int rawSlot) {
         if (rawSlot < 0) {
             return null;
+        }
+        Inventory inventory = view.getInventory(rawSlot);
+        if (inventory != null) {
+            return inventory;
         }
         if (rawSlot < view.getTopInventory().getSize()) {
             return view.getTopInventory();

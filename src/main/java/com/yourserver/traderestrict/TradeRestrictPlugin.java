@@ -23,7 +23,6 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 public final class TradeRestrictPlugin extends JavaPlugin {
 
-    private PersistentItemStore itemStore;
     private GroundItemManager groundItemManager;
 
     @Override
@@ -34,7 +33,7 @@ public final class TradeRestrictPlugin extends JavaPlugin {
         AllowedInventoryProvider allowedInventoryProvider = new ConfiguredAllowedInventoryProvider(this);
         InventoryAccess inventoryAccess = new InventoryAccess(allowedInventoryProvider);
         RestrictedItemMarker marker = new RestrictedItemMarker(this);
-        this.itemStore = new PersistentItemStore(this);
+        PersistentItemStore itemStore = new PersistentItemStore(this);
         RestrictedItemReturner returner = new RestrictedItemReturner(this, itemStore, marker);
         this.groundItemManager = new GroundItemManager(this, marker, returner);
 
@@ -56,8 +55,5 @@ public final class TradeRestrictPlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
-        if (itemStore != null) {
-            itemStore.reload();
-        }
     }
 }
